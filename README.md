@@ -1,4 +1,4 @@
-# EEGBlink
+# EEGBlink --> FlappyBird
 
 ## Setup for Windows 11
 ```
