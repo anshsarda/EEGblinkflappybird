@@ -480,3 +480,4 @@ else:
     stop_event.set()
     board.stop_stream()
     board.release_session()
+
