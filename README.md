@@ -17,8 +17,8 @@ All of the Python packages would be installed into the folder `pyenv/`, so they 
 
 ## Using the blink program
 ```
-python run_vep.py
+python run_blink.py
 python scripts/train_trca.py
-(change the run number in run_vep.py)
+(change the run number in run_blink.py)
 ```
 Repeat the above steps to run the blink program multiple times until you get the desired results.
