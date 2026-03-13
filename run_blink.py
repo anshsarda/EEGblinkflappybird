@@ -1,7 +1,11 @@
 from psychopy import visual, core
 from psychopy.hardware import keyboard
 import numpy as np
-import os, time, glob, sys, serial, pickle
+import os
+import time
+import glob
+import sys
+import serial
 from serial import Serial
 from threading import Thread, Event
 from queue import Queue
@@ -28,13 +32,14 @@ save_file_aux = save_dir + f"aux_run-{run}.npy"
 save_file_timestamp = save_dir + f"timestamp_run-{run}.npy"
 save_file_events = save_dir + f"events_run-{run}.npy"
 
+
 # PSYCHOPY WINDOW
 
 kb = keyboard.Keyboard()
 
 window = visual.Window(
     size=[width, height],
-    checkTiming=True,
+    checkTiming=False,   # safer for debugging; switch to True later if needed
     allowGUI=False,
     fullscr=True,
     useRetina=False,
@@ -68,8 +73,8 @@ fixation = visual.TextStim(
 )
 
 def create_photosensor_dot(size=0.08):
-    width, height = window.size
-    aspect_ratio = width / height
+    win_width, win_height = window.size
+    aspect_ratio = win_width / win_height
     return visual.Rect(
         win=window,
         units="norm",
@@ -77,10 +82,11 @@ def create_photosensor_dot(size=0.08):
         height=size * aspect_ratio,
         fillColor='black',
         lineWidth=0,
-        pos=[1 - size/2, -1 + size/2]
+        pos=[1 - size / 2, -1 + size / 2]
     )
 
 photosensor_dot = create_photosensor_dot()
+
 
 # OPENBCI / BRAINFLOW
 
@@ -155,7 +161,7 @@ if cyton_in:
 eeg = np.zeros((8, 0))
 aux = np.zeros((3, 0))
 timestamp = np.zeros((0,))
-events = []   # list of dicts with trial/event timing
+events = []
 
 global_clock = core.Clock()
 
@@ -168,14 +174,27 @@ def collect_queue_data():
             aux = np.concatenate((aux, aux_in), axis=1)
             timestamp = np.concatenate((timestamp, timestamp_in), axis=0)
 
+def shutdown_and_save():
+    collect_queue_data()
+    os.makedirs(save_dir, exist_ok=True)
+    np.save(save_file_eeg, eeg)
+    np.save(save_file_aux, aux)
+    np.save(save_file_timestamp, timestamp)
+    np.save(save_file_events, np.array(events, dtype=object))
+
+    if cyton_in:
+        stop_event.set()
+        board.stop_stream()
+        board.release_session()
+
 def check_escape():
     keys = kb.getKeys()
-    if 'escape' in keys:
+    if any(k.name == 'escape' for k in keys):
         shutdown_and_save()
+        window.close()
         core.quit()
 
 def draw_screen(main_stim=None, trial_label="", photo_white=False):
-    window.color = "black"
     if main_stim is not None:
         main_stim.draw()
     if trial_label:
@@ -194,125 +213,102 @@ def timed_screen(stim, duration, event_name=None, trial_idx=None, photo_white=Fa
             "time": start_time
         })
 
+    if trial_idx is None or trial_idx < 0:
+        label = ""
+    else:
+        label = f"Trial {trial_idx + 1}/{n_trials}"
+
     timer = core.Clock()
     while timer.getTime() < duration:
         check_escape()
         collect_queue_data()
-        draw_screen(main_stim=stim, trial_label=f"Trial {trial_idx+1}/{n_trials}", photo_white=photo_white)
+        draw_screen(main_stim=stim, trial_label=label, photo_white=photo_white)
 
-def shutdown_and_save():
-    collect_queue_data()
-    os.makedirs(save_dir, exist_ok=True)
-    np.save(save_file_eeg, eeg)
-    np.save(save_file_aux, aux)
-    np.save(save_file_timestamp, timestamp)
-    np.save(save_file_events, np.array(events, dtype=object))
-
-    if cyton_in:
-        stop_event.set()
-        board.stop_stream()
-        board.release_session()
 
 # TASK START SCREEN
 
-<<<<<<< HEAD
-            keys = keyboard.getKeys()
-            if 'escape' in keys:
-                stop_event.set()
-                board.stop_stream()
-                board.release_session()
-                core.quit()
-            
-            visual_stimulus.colors = np.array([stimulus_frames[i_frame]] * 3).T
-            visual_stimulus.draw()
-            photosensor_dot.color = np.array([1, 1, 1])
-            photosensor_dot.draw()
-            if core.getTime() > next_flip and i_frame != 0:
-                print('Missed frame')
-            window.flip()
-        visual_stimulus.colors = np.array([-1] * 3).T
-        visual_stimulus.draw()
-        photosensor_dot.color = np.array([-1, -1, -1])
-        photosensor_dot.draw()
-        window.flip()
-        if cyton_in:
-            while len(trial_ends) <= i_trial+skip_count: # Wait for the current trial to be collected
-                while not queue_in.empty(): # Collect all data from the queue
-                    eeg_in, aux_in, timestamp_in = queue_in.get()
-                    print('data-in: ', eeg_in.shape, aux_in.shape, timestamp_in.shape)
-                    eeg = np.concatenate((eeg, eeg_in), axis=1)
-                    aux = np.concatenate((aux, aux_in), axis=1)
-                    timestamp = np.concatenate((timestamp, timestamp_in), axis=0)
-                photo_trigger = (aux[1] > 20).astype(int)
-                trial_starts = np.where(np.diff(photo_trigger) == 1)[0]
-                trial_ends = np.where(np.diff(photo_trigger) == -1)[0]
-            print('total: ',eeg.shape, aux.shape, timestamp.shape)
-            baseline_duration = 0.2
-            baseline_duration_samples = int(baseline_duration * sampling_rate)
-            trial_start = trial_starts[i_trial+skip_count] - baseline_duration_samples
-            trial_duration = int(stim_duration * sampling_rate) + baseline_duration_samples
-            filtered_eeg = mne.filter.filter_data(eeg, sfreq=sampling_rate, l_freq=2, h_freq=40, verbose=False)
-            trial_eeg = np.copy(filtered_eeg[:, trial_start:trial_start+trial_duration])
-            trial_aux = np.copy(aux[:, trial_start:trial_start+trial_duration])
-            print(f'trial {i_trial}: ', trial_eeg.shape, trial_aux.shape)
-            baseline_average = np.mean(trial_eeg[:, :baseline_duration_samples], axis=1, keepdims=True)
-            trial_eeg -= baseline_average
-            eeg_trials.append(trial_eeg)
-            aux_trials.append(trial_aux)
-            cropped_eeg = trial_eeg[:, baseline_duration_samples:]
-            if model is not None:
-                prediction = model.predict(cropped_eeg)[0]
-        pred_letter = letters[prediction]
-        if pred_letter not in ['⎵', '⌫', '⤒']:
-            if shift:
-                pred_text_string += pred_letter
-                shift = False
-            else:
-                pred_text_string += pred_letter.lower()
-        elif pred_letter == '⌫':
-            pred_text_string = pred_text_string[:-1]
-        elif pred_letter == '⎵':
-            pred_text_string += ' '
-        elif pred_letter == '⤒':
-            shift = True
-        if len(pred_text_string) > 74:
-            pred_text_string = pred_text_string[-74:]
-    stop_event.set()
-    board.stop_stream()
-    board.release_session()
-=======
-instruction_text.text = "You will see a countdown.\nBlink once when the screen says BLINK NOW.\n\nPress any key to begin."
+instruction_text.text = (
+    "You will see a countdown.\n"
+    "Blink once when the screen says BLINK NOW.\n\n"
+    "Press any key to begin."
+)
+
 while True:
     draw_screen(main_stim=instruction_text, photo_white=False)
     keys = kb.getKeys()
     if len(keys) > 0:
         break
 
+
 # TRIAL LOOP
 
 for i_trial in range(n_trials):
     fixation.text = "+"
-    timed_screen(fixation, baseline_duration, event_name="baseline", trial_idx=i_trial, photo_white=False)
+    timed_screen(
+        fixation,
+        baseline_duration,
+        event_name="baseline",
+        trial_idx=i_trial,
+        photo_white=False
+    )
 
     instruction_text.text = "Blink in 3"
-    timed_screen(instruction_text, countdown_step, event_name="countdown_3", trial_idx=i_trial, photo_white=False)
+    timed_screen(
+        instruction_text,
+        countdown_step,
+        event_name="countdown_3",
+        trial_idx=i_trial,
+        photo_white=False
+    )
 
     instruction_text.text = "2"
-    timed_screen(instruction_text, countdown_step, event_name="countdown_2", trial_idx=i_trial, photo_white=False)
+    timed_screen(
+        instruction_text,
+        countdown_step,
+        event_name="countdown_2",
+        trial_idx=i_trial,
+        photo_white=False
+    )
 
     instruction_text.text = "1"
-    timed_screen(instruction_text, countdown_step, event_name="countdown_1", trial_idx=i_trial, photo_white=False)
+    timed_screen(
+        instruction_text,
+        countdown_step,
+        event_name="countdown_1",
+        trial_idx=i_trial,
+        photo_white=False
+    )
 
     instruction_text.text = "BLINK NOW"
-    timed_screen(instruction_text, blink_duration, event_name="blink_now", trial_idx=i_trial, photo_white=True)
+    timed_screen(
+        instruction_text,
+        blink_duration,
+        event_name="blink_now",
+        trial_idx=i_trial,
+        photo_white=True
+    )
 
     instruction_text.text = "Relax"
-    timed_screen(instruction_text, rest_duration, event_name="rest", trial_idx=i_trial, photo_white=False)
+    timed_screen(
+        instruction_text,
+        rest_duration,
+        event_name="rest",
+        trial_idx=i_trial,
+        photo_white=False
+    )
+
+
+# END SCREEN + SAVE
 
 instruction_text.text = "Done.\nThank you."
-timed_screen(instruction_text, 2.0, event_name="task_end", trial_idx=-1, photo_white=False)
+timed_screen(
+    instruction_text,
+    2.0,
+    event_name="task_end",
+    trial_idx=None,
+    photo_white=False
+)
 
 shutdown_and_save()
 window.close()
 core.quit()
->>>>>>> de10f5806f96f3678e1f5af0aaec1a63aeecfb0b
