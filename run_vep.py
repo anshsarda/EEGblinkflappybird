@@ -6,12 +6,10 @@ from serial import Serial
 from threading import Thread, Event
 from queue import Queue
 
-
-cyton_in = False
 lsl_out = False
 # SETTINGS
 
-cyton_in = False
+cyton_in = True
 width = 1536
 height = 864
 sampling_rate = 250
