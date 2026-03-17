@@ -22,6 +22,13 @@ def bandpass(x, low=1, high=15):
     return filtfilt(b, a, x, axis=1)
 
 
+def pad_epoch(ep, target_len):
+    out = np.zeros((ep.shape[0], target_len))
+    L = min(ep.shape[1], target_len)
+    out[:, :L] = ep[:, :L]
+    return out
+
+
 def make_epochs(eeg, events, timestamps):
     eeg = eeg[EEG_CH, :]
     eeg = bandpass(eeg)
@@ -57,17 +64,21 @@ def make_epochs(eeg, events, timestamps):
         c = idx + int(1.5 * FS)
         d = c + win
 
-        if a < 0 or b > eeg.shape[1]:
-            continue
-        if d > eeg.shape[1]:
-            continue
+        # clamp EVERYTHING (never skip)
+        a = max(0, a)
+        b = min(eeg.shape[1], b)
+
+        c = max(0, c)
+        d = min(eeg.shape[1], d)
 
         e1 = eeg[:, a:b]
         e2 = eeg[:, c:d]
 
-        if e1.shape[1] != win or e2.shape[1] != win:
-            continue
+        # ALWAYS pad to correct size
+        e1 = pad_epoch(e1, win)
+        e2 = pad_epoch(e2, win)
 
+        # remove DC offset
         e1 = e1 - e1.mean(axis=1, keepdims=True)
         e2 = e2 - e2.mean(axis=1, keepdims=True)
 
@@ -140,7 +151,7 @@ def train_model(X, y):
     Xf = extract_features(X)
 
     if len(Xf) == 0:
-        raise ValueError("No training data — check event parsing.")
+        raise ValueError("No training data.")
 
     scaler = StandardScaler()
     Xf = scaler.fit_transform(Xf)
@@ -172,10 +183,6 @@ def predict(model, ep):
 
 
 def evaluate(model, X, y):
-    if len(X) == 0:
-        print("no test data")
-        return
-
     preds = []
 
     for ep in X:
@@ -192,11 +199,6 @@ def evaluate(model, X, y):
 
     print("blink accuracy:", blink_acc)
     print("no-blink accuracy:", noblink_acc)
-
-    print("\nsample probabilities:")
-    for i in range(min(10, len(X))):
-        _, prob = predict(model, X[i])
-        print(round(prob, 3))
 
 
 if __name__ == "__main__":
