@@ -4,7 +4,6 @@ import joblib
 import numpy as np
 
 from scipy.signal import butter, filtfilt
-from sklearn.decomposition import FastICA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.preprocessing import StandardScaler
 
@@ -16,9 +15,8 @@ THRESH = 50
 
 MODEL_FILE = "blink_model.joblib"
 
-# change these to control training/testing
 TRAIN_RUNS = ["1", "2"]
-TEST_RUNS = ["3"]
+TEST_RUNS  = ["3"]
 
 
 def bandpass(x, low=1, high=15):
@@ -54,8 +52,9 @@ def make_epochs(eeg, aux):
     noblink = []
 
     for s, _ in pairs:
-        a = s - int(0.2 * FS)
-        b = s + int(0.8 * FS)
+        # shifted forward (better timing)
+        a = s + int(0.1 * FS)
+        b = s + int(0.9 * FS)
 
         c = s + int(1.3 * FS)
         d = s + int(2.3 * FS)
@@ -106,34 +105,27 @@ def balance(X, y):
     return X[idx], y[idx]
 
 
+def extract_features(X):
+    feats = []
+
+    for ep in X:
+        ch_feats = []
+
+        for ch in ep:
+            ch_feats.extend([
+                ch.max(),
+                ch.min(),
+                np.ptp(ch),
+                ch.std()
+            ])
+
+        feats.append(ch_feats)
+
+    return np.array(feats)
+
+
 def train_model(X, y):
-    n_ep, n_ch, n_t = X.shape
-
-    data = np.transpose(X, (1,0,2)).reshape(n_ch, -1).T
-
-    ica = FastICA(n_components=n_ch, random_state=0, max_iter=2000)
-    ica.fit(data)
-
-    S = np.array([ica.transform(ep.T).T for ep in X])
-
-    scores = []
-    for i in range(n_ch):
-        m1 = S[y==1, i, :].mean()
-        m0 = S[y==0, i, :].mean()
-        scores.append(abs(m1 - m0))
-
-    best = int(np.argmax(scores))
-
-    def feats(S):
-        x = S[:, best, :]
-        return np.column_stack([
-            x.max(axis=1),
-            x.min(axis=1),
-            np.ptp(x, axis=1),
-            x.std(axis=1),
-        ])
-
-    Xf = feats(S)
+    Xf = extract_features(X)
 
     scaler = StandardScaler()
     Xf = scaler.fit_transform(Xf)
@@ -142,26 +134,26 @@ def train_model(X, y):
     clf.fit(Xf, y)
 
     return {
-        "ica": ica,
-        "best": best,
         "scaler": scaler,
         "clf": clf
     }
 
 
 def predict(model, ep):
-    S = model["ica"].transform(ep.T).T
-    x = S[model["best"]]
+    feats = []
 
-    feat = np.array([
-        x.max(),
-        x.min(),
-        np.ptp(x),
-        x.std()
-    ]).reshape(1, -1)
+    for ch in ep:
+        feats.extend([
+            ch.max(),
+            ch.min(),
+            np.ptp(ch),
+            ch.std()
+        ])
 
-    feat = model["scaler"].transform(feat)
-    p = model["clf"].predict_proba(feat)[0,1]
+    feats = np.array(feats).reshape(1, -1)
+    feats = model["scaler"].transform(feats)
+
+    p = model["clf"].predict_proba(feats)[0,1]
 
     return int(p > 0.5), p
 
