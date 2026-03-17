@@ -9,10 +9,7 @@ from sklearn.preprocessing import StandardScaler
 
 
 FS = 250
-EEG_CH = [0, 1]      # FP1, FP2 only
-AUX_CH = 1
-THRESH = 50
-
+EEG_CH = [0, 1]   # FP1, FP2
 MODEL_FILE = "blink_model.joblib"
 
 TRAIN_RUNS = ["1", "2"]
@@ -25,42 +22,33 @@ def bandpass(x, low=1, high=15):
     return filtfilt(b, a, x, axis=1)
 
 
-def get_blink_windows(aux):
-    b = (aux > THRESH).astype(int)
-    starts = np.where(np.diff(b) == 1)[0] + 1
-    ends = np.where(np.diff(b) == -1)[0] + 1
-
-    out = []
-    j = 0
-    for s in starts:
-        while j < len(ends) and ends[j] <= s:
-            j += 1
-        if j < len(ends):
-            out.append((s, ends[j]))
-            j += 1
-    return out
-
-
-def make_epochs(eeg, aux):
+def make_epochs(eeg, events, timestamps):
     eeg = eeg[EEG_CH, :]
     eeg = bandpass(eeg)
 
-    aux = aux[AUX_CH]
-    pairs = get_blink_windows(aux)
+    win = int(0.8 * FS)
 
     blink = []
     noblink = []
 
-    win = int(0.8 * FS)
+    for ev in events:
+        if ev["event"] != "blink_now":
+            continue
 
-    for s, _ in pairs:
-        a = s + int(0.1 * FS)
-        b = a + win
+        t_sec = ev["time"]
 
-        c = s + int(1.2 * FS)
+        # map time → sample index
+        idx = np.argmin(np.abs(timestamps - t_sec))
+
+        a = idx - win // 2
+        b = idx + win // 2
+
+        c = idx + int(1.5 * FS)
         d = c + win
 
-        if b > eeg.shape[1] or d > eeg.shape[1]:
+        if a < 0 or b > eeg.shape[1]:
+            continue
+        if d > eeg.shape[1]:
             continue
 
         e1 = eeg[:, a:b]
@@ -69,6 +57,7 @@ def make_epochs(eeg, aux):
         if e1.shape[1] != win or e2.shape[1] != win:
             continue
 
+        # remove DC offset
         e1 = e1 - e1.mean(axis=1, keepdims=True)
         e2 = e2 - e2.mean(axis=1, keepdims=True)
 
@@ -89,9 +78,10 @@ def load_runs(folder):
             run = f.split("-")[1].split(".")[0]
 
             eeg = np.load(os.path.join(folder, f))
-            aux = np.load(os.path.join(folder, f"aux_run-{run}.npy"))
+            events = np.load(os.path.join(folder, f"events_run-{run}.npy"), allow_pickle=True)
+            timestamps = np.load(os.path.join(folder, f"timestamp_run-{run}.npy"))
 
-            X, y = make_epochs(eeg, aux)
+            X, y = make_epochs(eeg, events, timestamps)
             runs[run] = (X, y)
 
     return runs
@@ -104,7 +94,6 @@ def balance(X, y):
     idx0 = np.where(y == 0)[0]
 
     n = min(len(idx1), len(idx0))
-
     idx = np.concatenate([idx1[:n], idx0[:n]])
 
     return X[idx], y[idx]
@@ -123,7 +112,7 @@ def extract_features(X):
                 np.min(ch),
                 np.ptp(ch),
                 np.std(ch),
-                np.sum(np.abs(ch))
+                np.sum(np.abs(ch))   # energy (very important)
             ])
 
         feats.append(ch_feats)
@@ -140,10 +129,7 @@ def train_model(X, y):
     clf = LinearDiscriminantAnalysis()
     clf.fit(Xf, y)
 
-    return {
-        "scaler": scaler,
-        "clf": clf
-    }
+    return {"scaler": scaler, "clf": clf}
 
 
 def predict(model, ep):
@@ -163,7 +149,6 @@ def predict(model, ep):
     feats = model["scaler"].transform(feats)
 
     p = model["clf"].predict_proba(feats)[0, 1]
-
     return int(p > 0.5), p
 
 
@@ -179,15 +164,8 @@ def evaluate(model, X, y):
     print("\nresults")
     print("total accuracy:", (preds == y).mean())
 
-    if (y == 1).sum() > 0:
-        blink_acc = ((preds == 1) & (y == 1)).sum() / (y == 1).sum()
-    else:
-        blink_acc = 0
-
-    if (y == 0).sum() > 0:
-        noblink_acc = ((preds == 0) & (y == 0)).sum() / (y == 0).sum()
-    else:
-        noblink_acc = 0
+    blink_acc = ((preds == 1) & (y == 1)).sum() / max((y == 1).sum(), 1)
+    noblink_acc = ((preds == 0) & (y == 0)).sum() / max((y == 0).sum(), 1)
 
     print("blink accuracy:", blink_acc)
     print("no-blink accuracy:", noblink_acc)
@@ -203,10 +181,8 @@ if __name__ == "__main__":
 
     runs = load_runs(folder)
 
-    X_train = []
-    y_train = []
-    X_test = []
-    y_test = []
+    X_train, y_train = [], []
+    X_test, y_test = [], []
 
     for r in TRAIN_RUNS:
         X_train.extend(runs[r][0])
