@@ -1,12 +1,9 @@
 import os
 import sys
 import time
-import glob
 import joblib
 import numpy as np
-import serial
 
-from serial import Serial
 from scipy.signal import butter, filtfilt
 from sklearn.decomposition import FastICA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
@@ -14,7 +11,7 @@ from sklearn.preprocessing import StandardScaler
 
 
 # ======================
-# BASIC SETTINGS
+# SETTINGS
 # ======================
 FS = 250
 EEG_CH = [0, 1, 2, 3]   # FP1, FP2, F3, F4
@@ -23,19 +20,17 @@ THRESH = 50
 
 MODEL_FILE = "blink_model.joblib"
 
+# Pick which runs you want for training/testing
+TRAIN_RUNS = ["1", "2"]
+TEST_RUNS  = ["3"]
 
-# ======================
 # FILTER
-# ======================
 def bandpass(x, low=1, high=15, fs=FS):
     nyq = fs / 2
     b, a = butter(4, [low / nyq, high / nyq], btype="band")
     return filtfilt(b, a, x, axis=1)
 
-
-# ======================
-# FIND BLINK TIMES (photosensor)
-# ======================
+# FIND BLINKS
 def get_blink_windows(aux):
     b = (aux > THRESH).astype(int)
     starts = np.where(np.diff(b) == 1)[0] + 1
@@ -51,10 +46,7 @@ def get_blink_windows(aux):
             j += 1
     return out
 
-
-# ======================
-# MAKE DATASET
-# ======================
+# BUILD DATASET
 def make_epochs(eeg, aux):
     eeg = eeg[EEG_CH, :]
     eeg = bandpass(eeg)
@@ -90,21 +82,34 @@ def make_epochs(eeg, aux):
     return X, y
 
 
-# ======================
-# ICA + LDA
-# ======================
+# LOAD RUNS SEPARATELY
+def load_runs(folder):
+    runs = {}
+
+    for f in os.listdir(folder):
+        if f.startswith("eeg_run"):
+            run = f.split("-")[1].split(".")[0]
+
+            eeg = np.load(os.path.join(folder, f))
+            aux = np.load(os.path.join(folder, f"aux_run-{run}.npy"))
+
+            X, y = make_epochs(eeg, aux)
+            runs[run] = (X, y)
+
+    return runs
+
+
+# TRAIN MODEL
 def train_model(X, y):
     n_ep, n_ch, n_t = X.shape
 
-    # fit ICA on all training data
     data = np.transpose(X, (1,0,2)).reshape(n_ch, -1).T
+
     ica = FastICA(n_components=n_ch, random_state=0, max_iter=2000)
     ica.fit(data)
 
-    # transform each epoch
     S = np.array([ica.transform(ep.T).T for ep in X])
 
-    # pick component that best separates blink vs no-blink
     scores = []
     for i in range(n_ch):
         m1 = S[y==1, i, :].mean()
@@ -113,7 +118,6 @@ def train_model(X, y):
 
     best = int(np.argmax(scores))
 
-    # simple features
     def feats(S):
         x = S[:, best, :]
         return np.column_stack([
@@ -138,122 +142,72 @@ def train_model(X, y):
         "clf": clf
     }
 
-
+# PREDICT
 def predict(model, ep):
-    ica = model["ica"]
-    best = model["best"]
-    scaler = model["scaler"]
-    clf = model["clf"]
-
-    S = ica.transform(ep.T).T
-    x = S[best]
+    S = model["ica"].transform(ep.T).T
+    x = S[model["best"]]
 
     feat = np.array([
         x.max(),
         x.min(),
-        np.ptp(),
+        np.ptp(x),
         x.std()
     ]).reshape(1, -1)
 
-    feat = scaler.transform(feat)
-    p = clf.predict_proba(feat)[0,1]
+    feat = model["scaler"].transform(feat)
+    p = model["clf"].predict_proba(feat)[0,1]
 
     return int(p > 0.7), p
 
+# EVAL ON TESTING
+def evaluate(model, X, y):
+    preds = []
 
-# ======================
-# LOAD DATA
-# ======================
-def load_all(folder):
-    X_all = []
-    y_all = []
+    for ep in X:
+        p, _ = predict(model, ep)
+        preds.append(p)
 
-    for f in os.listdir(folder):
-        if f.startswith("eeg_run"):
-            run = f.split("-")[1].split(".")[0]
+    preds = np.array(preds)
 
-            eeg = np.load(os.path.join(folder, f))
-            aux = np.load(os.path.join(folder, f"aux_run-{run}.npy"))
+    acc = (preds == y).mean()
 
-            X, y = make_epochs(eeg, aux)
-            X_all.append(X)
-            y_all.append(y)
+    print("\n===== RESULTS =====")
+    print("Total accuracy:", round(acc, 3))
 
-    return np.concatenate(X_all), np.concatenate(y_all)
+    blink_acc = ((preds==1)&(y==1)).sum() / (y==1).sum()
+    noblink_acc = ((preds==0)&(y==0)).sum() / (y==0).sum()
 
-
-# ======================
-# CYTON PORT
-# ======================
-def find_port():
-    for i in range(1, 256):
-        port = f"COM{i}"
-        try:
-            s = Serial(port, 115200, timeout=1)
-            s.write(b'v')
-            time.sleep(1)
-            data = s.read(2000).decode(errors='ignore')
-            s.close()
-            if "OpenBCI" in data:
-                return port
-        except:
-            pass
-    raise Exception("Cyton not found")
+    print("Blink accuracy:", round(blink_acc, 3))
+    print("No-blink accuracy:", round(noblink_acc, 3))
 
 
-# ======================
-# LIVE MODE
-# ======================
-def run_live(model):
-    from brainflow.board_shim import BoardShim, BrainFlowInputParams
-
-    params = BrainFlowInputParams()
-    params.serial_port = find_port()
-
-    board = BoardShim(0, params)
-    board.prepare_session()
-    board.start_stream()
-
-    print("running... ctrl+c to stop")
-
-    try:
-        while True:
-            data = board.get_board_data()
-            if data.shape[1] < FS:
-                continue
-
-            eeg = data[board.get_eeg_channels(0), :]
-            eeg = eeg[EEG_CH, -FS:]
-
-            pred, prob = predict(model, eeg)
-
-            if pred:
-                print("BLINK", round(prob,3))
-            else:
-                print("no", round(prob,3))
-
-            time.sleep(0.2)
-
-    except KeyboardInterrupt:
-        board.stop_stream()
-        board.release_session()
-
-
-# ======================
 # MAIN
-# ======================
 if __name__ == "__main__":
-    mode = sys.argv[1]
+    folder = sys.argv[1]
 
-    if mode == "train":
-        folder = sys.argv[2]
+    runs = load_runs(folder)
 
-        X, y = load_all(folder)
-        model = train_model(X, y)
+    # ======================
+    # SPLIT DATA
+    # ======================
+    X_train = np.concatenate([runs[r][0] for r in TRAIN_RUNS])
+    y_train = np.concatenate([runs[r][1] for r in TRAIN_RUNS])
 
-        joblib.dump(model, MODEL_FILE)
-        print("saved:", MODEL_FILE)
+    X_test = np.concatenate([runs[r][0] for r in TEST_RUNS])
+    y_test = np.concatenate([runs[r][1] for r in TEST_RUNS])
 
-    elif mode == "live":
-        model = joblib.load(MODEL_FILE)
-        run_live(model)
+    print("Training on runs:", TRAIN_RUNS)
+    print("Testing on runs:", TEST_RUNS)
+
+    # ======================
+    # TRAIN
+    # ======================
+    model = train_model(X_train, y_train)
+
+    joblib.dump(model, MODEL_FILE)
+    print("Model saved :)")
+
+    # ======================
+    # TEST
+    # ======================
+    evaluate(model, X_test, y_test)
